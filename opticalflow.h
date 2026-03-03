@@ -53,11 +53,21 @@ void Lukas_Kanade(const OpticalFlowLKIn* Input_data, OpticalFlowOut* Output_data
 /// @return         структура FlowResult[out]
 FlowResult Lukas_Kanade_point(unsigned char* frame1, unsigned char* frame2, int width, int height, int x, int y);
 
-/// @brief Алгоритм вычисления оптического потока алгоритмом Пирамидального Лукаса-Канаде
+/// @brief Функция вычисления оптического потока алгоритмом Пирамидального Лукаса-Канаде
 /// @param Input_data   Структура входных данных[in]
 /// @param Output_data  Структура выходных данных[out]
 /// @return             STATUS - OK или ERROR
 STATUS Lukas_Kanade_piramidal(const OpticalFlowLKPiramidalIn* Input_data, OpticalFlowOut* Output_data);
+
+/// @brief Функция для вычисления плотного оптического потока алгоритмом Фарнебека 
+/// @param img1     Предыдущее кадр[in]
+/// @param img2     Текущий кадр[in]
+/// @param width    Ширина кадра[in]
+/// @param height   Высота кадра[in]
+/// @param flow_x   Указатель на массив смещений по х[out]
+/// @param flow_y   Указатель на массив смещений по y[out]
+/// @return         STATUS - OK или ERROR
+STATUS Farneback(const unsigned char* img1, const unsigned char* img2, const int width, const int height, float* flow_x, float* flow_y);
 
 #ifdef __cplusplus
 }
