@@ -330,9 +330,13 @@ void compute_gradients(const unsigned char* img, int width, int height, float* g
 }
 
 //Основная функция нахождения плотного оптичесокго потока алгоритмом Farneback
-STATUS Farneback(const unsigned char* img1, const unsigned char* img2, const int width, const int height,
-                float* flow_x, float* flow_y) {
-    
+STATUS Farneback(const FarnebackInput* Input_data, float* flow_x, float* flow_y) {
+    // Инициализация данных
+    int width = Input_data->frame_width;
+    int height = Input_data->frame_height;
+    unsigned char* img1 = Input_data->frame_prev;
+    unsigned char* img2 = Input_data->frame_curr;
+
     int size = width * height;
 
     // Заполнение смещения нулями
