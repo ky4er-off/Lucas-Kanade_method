@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <limits.h>
+#include <string.h>
 
 #include "opticalflow.h"
 #include <multicore.h> //Оптимизация для распаралеливания(будующая)
@@ -9,6 +11,7 @@
 #define WINDOW_SIZE 1 //радиус окружности для расчета(1 -> 3х3)
 #define Koef_K 2 //Коэффициент сжатия изображения
 #define Max_Pyramid_Level 4 //Максимальноек колличество уровней пирамиды Гаусса
+#define PYRAMID_LEVELS 3 //Количество уровней пирамид для плотноного оптического потока методом SAD
 
 // Веса окна по Гаусианне(нормализованные, ср.кв.откл=0.8)
 static const float GaussianWeights[3][3] = {
@@ -21,6 +24,13 @@ static const float GaussianWeights[3][3] = {
 typedef struct {
     float data[3][3][3];
 } Gradient3x3x3;
+
+// Структура для пирамид Гаусса(SAD)
+typedef struct {
+    unsigned char* data;  // Выделяется нами
+    int width;
+    int height;
+} ImagePyramidLevel;
 
 // Подсчет значений частных производных(градиента)
 static Gradient3x3x3 calculate_gradient(unsigned char* frame1, unsigned char* frame2, 
@@ -277,5 +287,104 @@ STATUS Lukas_Kanade_piramidal(const OpticalFlowLKPiramidalIn* Input_data, Optica
     
     // Очищаем память
     pyramidMemoryDelete(pyramid1, pyramid2, pyramid_lvl);
+    return OK;
+}
+
+// Решение системы 2x2 по правилу Крамера(для решения уравнения в алгоритме Фернебека)
+void solve_2x2(float A[2][2], float b[2], float* x, float* y) {
+    float det = A[0][0]*A[1][1] - A[0][1]*A[1][0];
+    if (det*det < 1e-8) {
+        *x = 0;
+        *y = 0;
+        return;
+    }
+    float inv_det = 1.0f / det;
+    *x = (b[0]*A[1][1] - b[1]*A[0][1]) * inv_det;
+    *y = (A[0][0]*b[1] - A[1][0]*b[0]) * inv_det;
+}
+
+// вычисляем градиенты для всего изображения(для определения плотного оптического потока)
+void compute_gradients(const unsigned char* img, int width, int height, float* grad_x, float* grad_y) {
+    for (int y=1; y<height-1; y++) {
+        for (int x=1; x<width-1; x++) {
+            int idx = y*width + x;
+            float gx = (float)(img[idx+1] - img[idx-1]) * 0.5f;
+            float gy = (float)(img[(y+1)*width + x] - img[(y-1)*width + x]) * 0.5f;
+            grad_x[idx] = gx;
+            grad_y[idx] = gy;
+        }
+    }
+    // границы
+    for (int x=0; x<width; x++) {
+        grad_x[x] = 0;
+        grad_x[(height-1)*width + x] = 0;
+        grad_y[x] = 0;
+        grad_y[(height-1)*width + x] = 0;
+    }
+    for (int y=0; y<height; y++) {
+        grad_x[y*width] = 0;
+        grad_x[y*width + (width-1)] = 0;
+        grad_y[y*width] = 0;
+        grad_y[y*width + (width-1)] = 0;
+    }
+}
+
+//Основная функция нахождения плотного оптичесокго потока алгоритмом Farneback
+STATUS Farneback(const unsigned char* img1, const unsigned char* img2, const int width, const int height,
+                float* flow_x, float* flow_y) {
+    
+    int size = width * height;
+
+    // Заполнение смещения нулями
+    memset(flow_x, 0, size * sizeof(float));
+    memset(flow_y, 0, size * sizeof(float));
+
+    // Выделяем память под градиентов всего изображения
+    float* Ix = (float*)malloc(size * sizeof(float));
+    if (Ix == NULL){
+        return ERROR;
+    }
+    float* Iy = (float*)malloc(size * sizeof(float));
+    if (Iy == NULL){
+        return ERROR;
+    }
+
+    // Вычислить градиенты для первого(предыдущего) кадра
+    compute_gradients(img1, width, height, Ix, Iy);
+
+    // Вычисляем оптический потко для каждой точки кадра
+    for (int y=1; y<height-1; y++) {
+        for (int x=1; x<width-1; x++) {
+            int idx = y*width + x;
+
+            float gx = Ix[idx];
+            float gy = Iy[idx];
+            float It = (float)(img2[idx] - img1[idx]);
+
+            // Предвычисляем квадраты для повторного использования
+            const float gx2 = gx * gx;
+            const float gy2 = gy * gy;
+            const float gxgy = gx * gy;
+
+            // Заполнение матрицы А и b
+            float A[2][2] = {
+                {gx2, gxgy},
+                {gxgy, gy2}
+            };
+            
+            // Вектор b
+            float b[2] = {
+                -gx * It,
+                -gy * It
+            };
+
+            //Инициализируем функцию решения матричного уравнения
+            solve_2x2(A, b, &flow_x[idx], &flow_y[idx]);
+        }
+    }
+    // Освобождаем память
+    free(Ix);
+    free(Iy);
+
     return OK;
 }
