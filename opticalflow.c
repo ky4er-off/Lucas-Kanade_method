@@ -3,6 +3,8 @@
 #include <math.h>
 #include <limits.h>
 #include <string.h>
+#include <utils/mvt/core_sched.h> //Автомотическое определение распределения данных по ядрам
+#include <cache.h>
 
 #include "opticalflow.h"
 #include <multicore.h> //Оптимизация для распаралеливания(будующая)
@@ -290,7 +292,19 @@ STATUS Lukas_Kanade_piramidal(const OpticalFlowLKPiramidalIn* Input_data, Optica
     return OK;
 }
 
-// Решение системы 2x2 по правилу Крамера(для решения уравнения в алгоритме Фернебека)
+// Структура для передачи параметров (минимальная)
+typedef struct {
+    int start_y;
+    int end_y;
+    int width;
+    int height;
+    unsigned char* img1;
+    unsigned char* img2;
+    bool is_add_core;
+    float* flow_x;
+    float* flow_y;
+} ThreadData;
+
 void solve_2x2(float A[2][2], float b[2], float* x, float* y) {
     float det = A[0][0]*A[1][1] - A[0][1]*A[1][0];
     if (det*det < 1e-8) {
@@ -303,92 +317,169 @@ void solve_2x2(float A[2][2], float b[2], float* x, float* y) {
     *y = (A[0][0]*b[1] - A[1][0]*b[0]) * inv_det;
 }
 
-// вычисляем градиенты для всего изображения(для определения плотного оптического потока)
-void compute_gradients(const unsigned char* img, int width, int height, float* grad_x, float* grad_y) {
-    for (int y=1; y<height-1; y++) {
-        for (int x=1; x<width-1; x++) {
-            int idx = y*width + x;
-            float gx = (float)(img[idx+1] - img[idx-1]) * 0.5f;
-            float gy = (float)(img[(y+1)*width + x] - img[(y-1)*width + x]) * 0.5f;
-            grad_x[idx] = gx;
-            grad_y[idx] = gy;
+int process_slice(int param) {
+    ThreadData* data = (ThreadData*)param;
+    // Сброc кеша для доп. ядер
+    if (data->is_add_core){
+        inval_cache((unsigned long)data, (unsigned long)sizeof(*data));
+        inval_cache((unsigned long)(data->img1+data->start_y*data->width), (unsigned long)((data->end_y-data->start_y)*data->width));
+        inval_cache((unsigned long)(data->img2+data->start_y*data->width), (unsigned long)((data->end_y-data->start_y)*data->width));
+    }
+    
+    // Предварительное вычисление указателей
+    int width = data->width;
+    unsigned char* img1 = data->img1;
+    unsigned char* img2 = data->img2;
+    float* flow_x = data->flow_x;
+    float* flow_y = data->flow_y;
+    
+    for (int y = data->start_y; y < data->end_y; y++) {
+        // Индексы строк для быстрого доступа
+        int row_offset = y * width;
+        int row_above = (y-1) * width;
+        int row_below = (y+1) * width;
+        
+        for (int x = 1; x < width - 1; x++) {
+            int idx = row_offset + x;
+
+            // Градиенты
+            float Ix = (float)(img1[idx+1] - img1[idx-1]) * 0.5f;
+            float Iy = (float)(img1[row_below + x] - img1[row_above + x]) * 0.5f;
+            float It = (float)(img2[idx] - img1[idx]);
+
+            // Вычисление значений матрицы
+            float gx2 = Ix * Ix;
+            float gy2 = Iy * Iy;
+            float gxgy = Ix * Iy;
+
+            float A00 = gx2;
+            float A01 = gxgy;
+            float A11 = gy2;
+            
+            float b0 = -Ix * It;
+            float b1 = -Iy * It;
+
+            // Решение методом Крамера (оптимизированное)
+            float det = A00 * A11 - A01 * A01;
+            if (det*det > 1e-8) {
+                float inv_det = 1.0f / det;
+                flow_x[idx] = (b0 * A11 - b1 * A01) * inv_det;
+                flow_y[idx] = (A00 * b1 - A01 * b0) * inv_det;
+            } else {
+                flow_x[idx] = 0;
+                flow_y[idx] = 0;
+            }
         }
     }
-    // границы
-    for (int x=0; x<width; x++) {
-        grad_x[x] = 0;
-        grad_x[(height-1)*width + x] = 0;
-        grad_y[x] = 0;
-        grad_y[(height-1)*width + x] = 0;
+    // Сбрасываем в оперативку инфу c доп. ядер(вычисленные значения)
+    if (data->is_add_core){
+        flush_cache((unsigned long)(flow_x+data->start_y*data->width), (unsigned long)(((data->end_y-data->start_y)*data->width)*sizeof(float)));
+        flush_cache((unsigned long)(flow_y+data->start_y*data->width), (unsigned long)(((data->end_y-data->start_y)*data->width)*sizeof(float)));
     }
-    for (int y=0; y<height; y++) {
-        grad_x[y*width] = 0;
-        grad_x[y*width + (width-1)] = 0;
-        grad_y[y*width] = 0;
-        grad_y[y*width + (width-1)] = 0;
-    }
+    
+    return OK;
 }
 
-//Основная функция нахождения плотного оптичесокго потока алгоритмом Farneback
-STATUS Farneback(const FarnebackInput* Input_data, float* flow_x, float* flow_y) {
-    // Инициализация данных
-    int width = Input_data->frame_width;
-    int height = Input_data->frame_height;
+STATUS Lukas_Kanade_dense(const LKDenseInput* Input_data, float* flow_x, float* flow_y) {
+    const int width = Input_data->frame_width;
+    const int height = Input_data->frame_height;
     unsigned char* img1 = Input_data->frame_prev;
     unsigned char* img2 = Input_data->frame_curr;
+    const int cores_to_use = Input_data->num_cores;
 
     int size = width * height;
-
-    // Заполнение смещения нулями
     memset(flow_x, 0, size * sizeof(float));
     memset(flow_y, 0, size * sizeof(float));
 
-    // Выделяем память под градиентов всего изображения
-    float* Ix = (float*)malloc(size * sizeof(float));
-    if (Ix == NULL){
+    // Последовательное выполнение(1 ядро)
+    if (cores_to_use <= 1) {
+        ThreadData main_data = {
+            .start_y = 1,
+            .end_y = height - 1,
+            .width = width,
+            .height = height,
+            .img1 = img1,
+            .img2 = img2,
+            .flow_x = flow_x,
+            .flow_y = flow_y,
+            .is_add_core = FALSE,
+        };
+        return process_slice((int)&main_data) == OK ? OK : ERROR;
+    }
+
+    // Параллельное выполнение для 2+ ядер
+    ThreadData core_data[4];
+    int results[4] = {0};
+    int data_per_core[4];
+    
+    // Оптимальное разделение
+    int dist_error = distribute_data_cores(data_per_core, height-1, cores_to_use);
+    if (dist_error != 0){
         return ERROR;
     }
-    float* Iy = (float*)malloc(size * sizeof(float));
-    if (Iy == NULL){
-        return ERROR;
-    }
+    int current_y = 1;
+    int additional_data = 0;
+    
+    // Запускаем задачи(заполняем структуры)
+    for (int i = 0; i < cores_to_use; i++) {
+        core_data[i] = (ThreadData){
+            .start_y = current_y,
+            .end_y = current_y + data_per_core[i],
+            .width = width,
+            .height = height,
+            .img1 = img1,
+            .img2 = img2,
+            .flow_x = flow_x,
+            .flow_y = flow_y
+        };
+        current_y = core_data[i].end_y;
 
-    // Вычислить градиенты для первого(предыдущего) кадра
-    compute_gradients(img1, width, height, Ix, Iy);
-
-    // Вычисляем оптический потко для каждой точки кадра
-    for (int y=1; y<height-1; y++) {
-        for (int x=1; x<width-1; x++) {
-            int idx = y*width + x;
-
-            float gx = Ix[idx];
-            float gy = Iy[idx];
-            float It = (float)(img2[idx] - img1[idx]);
-
-            // Предвычисляем квадраты для повторного использования
-            const float gx2 = gx * gx;
-            const float gy2 = gy * gy;
-            const float gxgy = gx * gy;
-
-            // Заполнение матрицы А и b
-            float A[2][2] = {
-                {gx2, gxgy},
-                {gxgy, gy2}
-            };
-            
-            // Вектор b
-            float b[2] = {
-                -gx * It,
-                -gy * It
-            };
-
-            //Инициализируем функцию решения матричного уравнения
-            solve_2x2(A, b, &flow_x[idx], &flow_y[idx]);
+        if (i == 0){
+            core_data[i].is_add_core = FALSE;
+        }
+        else {
+            core_data[i].is_add_core = TRUE;
+            additional_data += data_per_core[i];
         }
     }
-    // Освобождаем память
-    free(Ix);
-    free(Iy);
+
+    //Передаем информацию для доп ядер в оперативку
+    flush_cache((unsigned long)&core_data[1], (unsigned long)((cores_to_use-1)*sizeof(ThreadData)));
+    flush_cache((unsigned long)(img1+data_per_core[0]*width), (unsigned long)(additional_data*width));
+    flush_cache((unsigned long)(img2+data_per_core[0]*width), (unsigned long)(additional_data*width));
+    
+    //Загружаем доп. ядра
+    for (int i = 1; i < cores_to_use; i++){
+        eCoreNumber core_num;
+        if (i == 1){
+            core_num = core_1;
+        }
+        else if (i == 2){
+            core_num = core_2;
+        }
+        else{
+            core_num = core_3;
+        }
+        if (coreExecute(core_num, process_slice, (int)&core_data[i]) != OK) {
+            return ERROR;
+        }
+    }
+
+    //Запускаем основное ядро
+    process_slice((int)&core_data[0]);
+    
+    // Ждем результат с дополнительных ядер
+    for (int i = 1; i < cores_to_use; i++) {
+        eCoreNumber core_num = (i == 1) ? core_1 : 
+                               (i == 2) ? core_2 : core_3;
+        
+        if (coreWait(core_num, 250, &results[i]) != OK || results[i] != OK) {
+            return ERROR;
+        }
+    }
+    //Очистка кеша основного ядра
+    inval_cache((unsigned long)(flow_x+data_per_core[0]*width), (unsigned long)(additional_data*width*sizeof(float)));
+    inval_cache((unsigned long)(flow_y+data_per_core[0]*width), (unsigned long)(additional_data*width*sizeof(float)));
 
     return OK;
 }
