@@ -70,6 +70,7 @@ typedef struct {
     int num_cores;              //Количество ядер процессора(если 0 -> распаралеливание не выполняется)
 } FarnebackInput;
 
+// It isn`t Farneback method. It is Lukas-Kanade dence method
 /// @brief Функция для вычисления плотного оптического потока алгоритмом Фарнебека
 /// @param Input_data   Структура входных данных[in]
 /// @param flow_x       Указатель на массив смещений по х[out]
