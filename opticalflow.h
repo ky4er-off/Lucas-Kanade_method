@@ -13,7 +13,6 @@ typedef struct {
     int frame_height;           //Высота кадра
     int points_num;             //Количество точек для обработки
     int* keypoints_in;          //Ключевые точки в формате {x0, y0, x1, y1, ...}
-    int num_cores;              //Количество ядер процессора(если 0 -> распаралеливание не выполняется)
 } OpticalFlowLKIn;
 
 // Структура входных данных Пирамидного Лукаса-Канаде[in]
@@ -26,7 +25,6 @@ typedef struct{
     int* keypoints_in;          //Ключевые точки в формате {x0, y0, x1, y1, ...}
     int pyramid_level;          //Количество уровней пирамид Гаусса (не больше 4 иначе работать не будет)
     int img_resize_method;      //1 - метод блочного усреднения, 2 - метод ближайшего соседа
-    int num_cores;              //Количество ядер процессора(если 0 -> распаралеливание не выполняется)
 } OpticalFlowLKPiramidalIn;
 
 //Выходная структура данных[out]
@@ -61,22 +59,21 @@ FlowResult Lukas_Kanade_point(unsigned char* frame1, unsigned char* frame2, int 
 /// @return             STATUS - OK или ERROR
 STATUS Lukas_Kanade_piramidal(const OpticalFlowLKPiramidalIn* Input_data, OpticalFlowOut* Output_data);
 
-//Структура входных данных алгоритма Farneback
+//Структура входных данных обобщенного алгоритма Лукаса-Канаде
 typedef struct {
     unsigned char* frame_prev;  //Предыдущий кадр
     unsigned char* frame_curr;  //Текущий кадр
     int frame_width;            // Ширина кадра
     int frame_height;           //Высота кадра
     int num_cores;              //Количество ядер процессора(если 0 -> распаралеливание не выполняется)
-} FarnebackInput;
+} LKDenseInput;
 
-// It isn`t Farneback method. It is Lukas-Kanade dence method
-/// @brief Функция для вычисления плотного оптического потока алгоритмом Фарнебека
+/// @brief Функция для вычисления плотного оптического потока обобщенным алгоритмом Лукаса-Канаде
 /// @param Input_data   Структура входных данных[in]
 /// @param flow_x       Указатель на массив смещений по х[out]
 /// @param flow_y       Указатель на массив смещений по y[out]
 /// @return             STATUS - OK или ERROR
-STATUS Farneback(const FarnebackInput* Input_data, float* flow_x, float* flow_y);
+STATUS Lukas_Kanade_dense(const LKDenseInput* Input_data, float* flow_x, float* flow_y);
 
 #ifdef __cplusplus
 }
